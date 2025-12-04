@@ -561,7 +561,27 @@ if __name__ == "__main__":
         FedProx_mu = 0.1
         Local_model = train_model.train(global_model, num_epochs, dataset_type, mu=FedProx_mu)
         print(f"DEBUG: Training complete. Local_model object type: {type(Local_model)}")
-
+        
+        
+        
+        # --- Metrics: start timer for this round ---
+        round_start = time.time()
+        FedProx_mu = 0.1
+        # train_model.train may return just a model or (model, metrics). handle both.
+        try:
+            trained = train_model.train(global_model, num_epochs, dataset_type, mu=FedProx_mu)
+            if isinstance(trained, tuple) and len(trained) >= 1:
+                Local_model = trained[0]
+                train_metrics = trained[1] if len(trained) > 1 else {}
+            else:
+                Local_model = trained
+                train_metrics = {}
+        except Exception as e:
+            print(f"DEBUG: Training failed: {e}")
+            raise
+        training_time = time.time() - round_start
+        print(f"DEBUG: Training complete. Time: {training_time:.3f}s. Local_model object type: {type(Local_model)}")
+ 
         if HE_algorithm != 'None':
             HE_enc_model, metadata = HE_encrypt_model(Local_model, HE_config_with_key, HE_algorithm)
             serialized_model = serialize_data(HE_enc_model, metadata, HE_algorithm)
@@ -572,6 +592,12 @@ if __name__ == "__main__":
             local_model_bytes = pickle.dumps(Local_model.state_dict())
             local_hash = hash_data(local_model_bytes)
             model_filename = f'local_model_{ETH_address}.pth'
+            he_encrypt_time = 0.0
+            serialize_time = 0.0
+            local_model_bytes = pickle.dumps(Local_model.state_dict())
+            local_hash = hash_data(local_model_bytes)
+            model_filename = f'local_model_{ETH_address}.pth'
+
 
         Local_model_info['Model hash'] = local_hash
         Local_model_info['Round number'] = r
@@ -580,7 +606,19 @@ if __name__ == "__main__":
 
         Tx_u = update_model_Tx(r, local_hash, hash_ct_epk_a, Task_id, project_id_received)
         print(f"DEBUG: Model Update Tx published: {Tx_u}")
-
+                # --- AES wrap / sign timing ---
+        aes_start = time.time()
+        json_info = json.dumps(Local_model_info, indent=4).encode('utf-8')
+        wrapped_model_info = wrapfiles(('Local_model_info.json', json_info), (model_filename, local_model_bytes))
+        model_ct = AES_encrypt_data(Model_key, wrapped_model_info)
+        aes_encrypt_time = time.time() - aes_start
+        Tx_u = update_model_Tx(r, local_hash, hash_ct_epk_a, Task_id, project_id_received)
+        print(f"DEBUG: Model Update Tx published: {Tx_u}")
+        
+        
+        
+        
+        
         json_info = json.dumps(Local_model_info, indent=4).encode('utf-8')
         wrapped_model_info = wrapfiles(('Local_model_info.json', json_info), (model_filename, local_model_bytes))
 
@@ -590,6 +628,27 @@ if __name__ == "__main__":
 
         client_socket.send(json.dumps({"msg_type": "local model update", "Data": session_id}).encode('utf-8'))
         send_model(client_socket, wraped_msg)
+                # --- finalize round metrics and append to CSV ---
+        round_end = time.time()
+        round_duration = round_end - round_start
+        payload_size = len(local_model_bytes) if local_model_bytes is not None else 0
+        wrapped_size = len(model_ct) if model_ct is not None else 0
+        val_acc = train_metrics.get('val_acc') if isinstance(train_metrics, dict) else None
+
+        # ensure metrics directory
+        metrics_dir = os.path.join(main_dir, 'metrics')
+        os.makedirs(metrics_dir, exist_ok=True)
+        metrics_file = os.path.join(metrics_dir, f'client_{project_id_received}_{ETH_address}.csv')
+        write_header = not os.path.exists(metrics_file)
+        try:
+            import csv
+            with open(metrics_file, 'a', newline='') as cf:
+                writer = csv.writer(cf)
+                if write_header:
+                    writer.writerow(['timestamp','project_id','round','client','training_time_s','he_encrypt_time_s','serialize_time_s','aes_encrypt_time_s','payload_bytes','wrapped_bytes','round_duration_s','val_acc','local_hash'])
+                writer.writerow([int(time.time()), project_id_received, r, ETH_address, f"{training_time:.6f}", f"{he_encrypt_time:.6f}", f"{serialize_time:.6f}", f"{aes_encrypt_time:.6f}", payload_size, wrapped_size, f"{round_duration:.6f}", val_acc, local_hash])
+        except Exception as e:
+            print(f"DEBUG: Failed to write metrics: {e}")
 
         project_id_fb, T, score = listen_for_feedback(r, ETH_address)
 

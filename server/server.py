@@ -1,5 +1,5 @@
 """
-Created on Tue Jan  2 14:18:41 2024
+Created on Tue Jan 2 14:18:41 2024
 @author: HIGHer
 """
 from web3 import Web3
@@ -17,7 +17,8 @@ from Crypto.Util.number import *
 
 import socket, pickle
 import tenseal as ts
-import os, sys, time,json
+import os, sys, time, json
+import csv # New import for metrics logging
 
 import aggregate
 from threading import *
@@ -29,6 +30,38 @@ from simple_cnn_config import SimpleCNN
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import *
 
+
+def log_server_metrics(metrics: dict, project_id: int, tag: str = "server"):
+    """
+    Append a server-side metrics row to metrics/server_<project_id>.csv.
+    Call this after you finish aggregation/publish task/upload to IPFS etc.
+    metrics: dict of metric_name -> value
+    tag: short string to indicate the phase (e.g. 'aggregate', 'publish', 'ipfs_upload')
+    """
+    try:
+        # Determine the project root directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        main_dir = os.path.dirname(script_dir)
+        metrics_dir = os.path.join(main_dir, 'metrics')
+        os.makedirs(metrics_dir, exist_ok=True)
+        metrics_file = os.path.join(metrics_dir, f'server_{project_id}.csv')
+        write_header = not os.path.exists(metrics_file)
+        
+        # Prepare data row
+        row_data = [int(time.time()), project_id, tag]
+        metric_keys = list(metrics.keys())
+        metric_values = [metrics[k] for k in metric_keys]
+
+        with open(metrics_file, 'a', newline='') as sf:
+            writer = csv.writer(sf)
+            if write_header:
+                header = ['timestamp', 'project_id', 'phase'] + metric_keys
+                writer.writerow(header)
+            
+            row = row_data + metric_values
+            writer.writerow(row)
+    except Exception as e:
+        print(f"DEBUG SERVER: Failed to write server metrics: {e}")
 
 # Global Variables (Initialized in __main__)
 w3 = None
@@ -77,12 +110,12 @@ def register_project(project_id, cnt_clients_req, hash_init_model, hash_keys):
                 gas_used=receipt['gasUsed']
                 tx_registration = receipt['transactionHash'].hex()
                 print(f'Project Registeration on contract:')
-                print(f'    Tx_hash: {tx_registration}')
-                print(f'    Gas: {gas_used} Wei')
-                print(f'    Project ID: {project_id}')
-                print(f'    required client count: {cnt_clients_req}') 
-                print(f'    Initial model hash: {hash_init_model}')
-                print(f'    Pubic keys hash: {hash_keys}')
+                print(f'     Tx_hash: {tx_registration}')
+                print(f'     Gas: {gas_used} Wei')
+                print(f'     Project ID: {project_id}')
+                print(f'     required client count: {cnt_clients_req}') 
+                print(f'     Initial model hash: {hash_init_model}')
+                print(f'     Pubic keys hash: {hash_keys}')
                 print('-'*75)
                 return tx_registration
             except ValueError as e:
@@ -94,37 +127,6 @@ def register_project(project_id, cnt_clients_req, hash_init_model, hash_keys):
         sys.exit()
 
 
-# def wait_for_clients(event_queue, stop_event, poll_interval=2):
-#     print('DEBUG SERVER: Event listener thread started (ClientRegistered events)') # DEBUG
-#     if geth_poa_middleware not in w3.middleware_onion: 
-#         # Add PoA middleware for Ganache (if needed)
-#         w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-#     # Create an instance of the contract
-#     contract = w3.eth.contract(address=contract_address, abi=contract_abi)
-#     last_processed_block = w3.eth.block_number  # Keep track of the last processed block
-#     while not stop_event.is_set():  # Check the stop_event to terminate the loop
-#         try:
-#             current_block = w3.eth.block_number  # Get current block number
-#             if current_block > last_processed_block:
-#                 # Create filter for the specific block range
-#                 event_filter = contract.events.ClientRegistered.create_filter(
-#                     fromBlock=last_processed_block + 1,
-#                     toBlock=current_block
-#                 )
-#                 events = event_filter.get_all_entries()  # Get events 
-#                 for event in events:  # Process events
-#                     event_queue.put(event)
-#                     print(f"DEBUG SERVER: Client registration event caught at block {event['blockNumber']}: {event['args']['clientAddress']}") # DEBUG
-#                 last_processed_block = current_block  # Update last processed block
-#                 w3.eth.uninstall_filter(event_filter.filter_id)  # Clean up filter
-
-#             time.sleep(poll_interval)  # Wait before next poll
-#         except Exception as e:
-#             print(f"DEBUG SERVER: Error in registration event listener: {str(e)}") # DEBUG
-#             time.sleep(poll_interval)  # Wait before retrying
-
-
-# ...existing code...
 def wait_for_clients(event_queue, stop_event, poll_interval=1):
     """
     Robust on-chain event poller for ClientRegistered events.
@@ -156,9 +158,10 @@ def wait_for_clients(event_queue, stop_event, poll_interval=1):
 
             events = []
             try:
+                # web3.py's .getLogs() is usually the preferred, more efficient way
                 events = contract.events.ClientRegistered().getLogs(fromBlock=from_block, toBlock=to_block)
             except Exception as ex_getlogs:
-                # fallback to filter-based retrieval
+                # fallback to filter-based retrieval if getLogs fails
                 try:
                     event_filter = contract.events.ClientRegistered.create_filter(fromBlock=from_block, toBlock=to_block)
                     events = event_filter.get_all_entries()
@@ -200,12 +203,11 @@ def wait_for_clients(event_queue, stop_event, poll_interval=1):
         except Exception as e:
             print(f"DEBUG SERVER: Error in registration event listener: {e}")
             time.sleep(poll_interval)
-# ...existing code...
+
 
 def finish_tash(task_id, project_id):
     contract = w3.eth.contract(address=contract_address, abi=contract_abi)
     print(f"DEBUG SERVER: Finishing Task {task_id}") # DEBUG
-    # ... [function body remains the same] ...
     nonce = w3.eth.get_transaction_count(Eth_address)
     
     # Build the transaction with task_id and project_id
@@ -223,16 +225,15 @@ def finish_tash(task_id, project_id):
     gas_used = receipt['gasUsed']
     tx_publish = receipt['transactionHash'].hex()
     print(f'Task terminated:')
-    print(f'    Tx_hash: {tx_publish}')
-    print(f'    Gas: {gas_used} Wei')
-    print(f'    Task ID: {task_id}')
-    print(f'    Project ID: {project_id}')
+    print(f'     Tx_hash: {tx_publish}')
+    print(f'     Gas: {gas_used} Wei')
+    print(f'     Task ID: {task_id}')
+    print(f'     Project ID: {project_id}')
     print('-' * 75)
 
 def finish_project(project_id):
     contract = w3.eth.contract(address=contract_address, abi=contract_abi)
     print(f"DEBUG SERVER: Finishing Project {project_id}") # DEBUG
-    # ... [function body remains the same] ...
     nonce = w3.eth.get_transaction_count(Eth_address)
     # Build the transaction with project_id
     transaction = contract.functions.finishProject(project_id).build_transaction({
@@ -249,16 +250,15 @@ def finish_project(project_id):
     gas_used = receipt['gasUsed']
     tx_publish = receipt['transactionHash'].hex()
     print(f'Project terminated:')
-    print(f'    Tx_hash: {tx_publish}')
-    print(f'    Gas: {gas_used} Wei')
-    print(f'    Project ID: {project_id}')
+    print(f'     Tx_hash: {tx_publish}')
+    print(f'     Gas: {gas_used} Wei')
+    print(f'     Project ID: {project_id}')
     print('-' * 75)
 
 
 def publish_task(r, Hash_model, hash_keys, Task_id, project_id, D_t):
     contract = w3.eth.contract(address=contract_address, abi=contract_abi)
     print(f"DEBUG SERVER: Publishing Task R:{r}. Model Hash: {Hash_model[:10]}..., Keys Hash: {hash_keys}") # DEBUG
-    # ... [function body remains the same] ...
     nonce = w3.eth.get_transaction_count(Eth_address)
     transaction = contract.functions.publishTask(r,Hash_model, hash_keys, Task_id, project_id, D_t).build_transaction({
         'from': Eth_address,
@@ -273,9 +273,9 @@ def publish_task(r, Hash_model, hash_keys, Task_id, project_id, D_t):
     tx_publish = receipt['transactionHash'].hex()
     print('')
     print(f'Task published round {r}:')
-    print(f'    Tx_hash: {tx_publish}')
-    print(f'    Gas: {gas_used} Wei')
-    print(f'    Task ID: {Task_id}')
+    print(f'     Tx_hash: {tx_publish}')
+    print(f'     Gas: {gas_used} Wei')
+    print(f'     Task ID: {Task_id}')
     print('-'*75)
     return tx_publish
 
@@ -287,25 +287,31 @@ def listen_for_updates(event_filter, event_queue):
         w3.middleware_onion.inject(geth_poa_middleware, layer=0)
     # Create an instance of the contract with the ABI and address
     contract = w3.eth.contract(address=contract_address, abi=contract_abi)
-    event_filter = contract.events.ModelUpdated.create_filter(fromBlock="latest")           # Get events since the last checked block
+    # NOTE: Using a static filter creator can miss events; relying on the main loop's logic to handle event processing.
+    # The current implementation uses a simple latest block filter, but the main loop's logic handles state.
+    event_filter = contract.events.ModelUpdated.create_filter(fromBlock="latest")
+    
     # Loop to listen for events
     while True:
-        events = event_filter.get_new_entries()
-        if events:
-            for event in events:
-                event_queue.put(event)
-                print(f"DEBUG SERVER: ModelUpdate event caught for {event['args']['clientAddress']}") # DEBUG
-        time.sleep(1)
+        try:
+            events = event_filter.get_new_entries()
+            if events:
+                for event in events:
+                    event_queue.put(event)
+                    print(f"DEBUG SERVER: ModelUpdate event caught for {event['args']['clientAddress']}") # DEBUG
+            time.sleep(1)
+        except Exception as e:
+            print(f"DEBUG SERVER: Error in ModelUpdate listener: {e}")
+            time.sleep(2)
 
 
 def feedback_TX(r, task_id, project_id, client_address, feedback_score, T):
     contract = w3.eth.contract(address=contract_address, abi=contract_abi)
     print(f"DEBUG SERVER: Sending Feedback (R:{r}) for {client_address}. Score: {feedback_score}") # DEBUG
-    # ... [function body remains the same] ...
     for attempt in range(3):  # Retry mechanism
         try:
             nonce = w3.eth.get_transaction_count(Eth_address, 'pending') # Fetch the current pending nonce
-            transaction = contract.functions.provideFeedback(r, task_id, project_id, client_address, feedback_score, T   # Add the feedback score
+            transaction = contract.functions.provideFeedback(r, task_id, project_id, client_address, feedback_score, T 
             ).build_transaction({
                 'from': Eth_address,
                 'gas': 2000000,
@@ -320,11 +326,11 @@ def feedback_TX(r, task_id, project_id, client_address, feedback_score, T):
             tx_feedback = receipt['transactionHash'].hex()
             # Print transaction details
             print(f'Feedback:')
-            print(f'      Client address: {client_address}')
-            print(f'      Tx_hash: {tx_feedback}')
-            print(f'      Gas: {gas_used} Wei')
-            print(f'      Task ID: {task_id}')
-            print(f'      Score: {feedback_score}')
+            print(f'           Client address: {client_address}')
+            print(f'           Tx_hash: {tx_feedback}')
+            print(f'           Gas: {gas_used} Wei')
+            print(f'           Task ID: {task_id}')
+            print(f'           Score: {feedback_score}')
             print('-'*75)
             return tx_feedback
         except ValueError as e:
@@ -339,39 +345,39 @@ def analyze_model (Local_model,Task_id,project_id_update):
 
 
 def establish_root_key(client_socket,clients_dict,ecdh,kyber,salt_a,session_id):
-            matching_addr = [address for address, details in clients_dict.items() if details.get("Session ID") == session_id] # find eth addr based Session ID
-            if not matching_addr:
-                print('DEBUG SERVER: Client session ID not found in registered clients.') # DEBUG
-                client_socket.close()
-                return None
-            
-            client_addr = matching_addr[0]
-            print(f"DEBUG SERVER: Key exchange started for {client_addr}") # DEBUG
+    matching_addr = [address for address, details in clients_dict.items() if details.get("Session ID") == session_id] # find eth addr based Session ID
+    if not matching_addr:
+        print('DEBUG SERVER: Client session ID not found in registered clients.') # DEBUG
+        client_socket.close()
+        return None
+    
+    client_addr = matching_addr[0]
+    print(f"DEBUG SERVER: Key exchange started for {client_addr}") # DEBUG
 
-            msg_keys={'epk_b_pem':(ecdh.pk).hex(), 'kpk_b':(kyber.pk).hex()}
-            client_socket.sendall(json.dumps(msg_keys).encode('utf-8'))
-            
-            data = client_socket.recv(4096).decode('utf-8')  # Receive epk_a_pem and ct from client via off-chain
-            if data is None:
-                print(f"DEBUG SERVER: Failed to receive client keys/ciphertext.") # DEBUG
-                client_socket.close()
-                return None
-                
-            received_data= json.loads(data) # Process the received Json data construct root, chain and model keys
-            epk_a_pem = bytes.fromhex(received_data['epk_a_pem'])
-            ct = bytes.fromhex(received_data['ciphertext']) 
-            print(f"DEBUG SERVER: Received ct len: {len(ct)}, epk_a_pem len: {len(epk_a_pem)}") # DEBUG
+    msg_keys={'epk_b_pem':(ecdh.pk).hex(), 'kpk_b':(kyber.pk).hex()}
+    client_socket.sendall(json.dumps(msg_keys).encode('utf-8'))
+    
+    data = client_socket.recv(4096).decode('utf-8')  # Receive epk_a_pem and ct from client via off-chain
+    if data is None:
+        print(f"DEBUG SERVER: Failed to receive client keys/ciphertext.") # DEBUG
+        client_socket.close()
+        return None
+        
+    received_data= json.loads(data) # Process the received Json data construct root, chain and model keys
+    epk_a_pem = bytes.fromhex(received_data['epk_a_pem'])
+    ct = bytes.fromhex(received_data['ciphertext']) 
+    print(f"DEBUG SERVER: Received ct len: {len(ct)}, epk_a_pem len: {len(epk_a_pem)}") # DEBUG
 
-            epk_a = ECC.import_key(epk_a_pem)
-            ss_e = key_agreement(eph_priv=ecdh.sk, eph_pub=epk_a, kdf=kdf)    # ECDH shared secret 
-            ss_k = ml_kem_768.decrypt(kyber.sk, ct)
-            SS = ss_k + ss_e           # (ss_k||ss_e) construnct general shared secret 
-            Root_key= HKDF(SS, 32, salt_a, SHA384, 1)     #  RK_1 <-- SS + Salt_a  
-            
-            clients_dict[client_addr]['Hash_ct_epk_a']=hash_data(ct +epk_a_pem) 
-            clients_dict[client_addr]['Root key']  = Root_key.hex()
-            print(f"DEBUG SERVER: Root Key established for {client_addr}. Hash(ct||epk): {clients_dict[client_addr]['Hash_ct_epk_a'][:10]}...") # DEBUG
-            return Root_key
+    epk_a = ECC.import_key(epk_a_pem)
+    ss_e = key_agreement(eph_priv=ecdh.sk, eph_pub=epk_a, kdf=kdf)    # ECDH shared secret 
+    ss_k = ml_kem_768.decrypt(kyber.sk, ct)
+    SS = ss_k + ss_e            # (ss_k||ss_e) construnct general shared secret 
+    Root_key= HKDF(SS, 32, salt_a, SHA384, 1)     #  RK_1 <-- SS + Salt_a  
+    
+    clients_dict[client_addr]['Hash_ct_epk_a']=hash_data(ct +epk_a_pem) 
+    clients_dict[client_addr]['Root key']  = Root_key.hex()
+    print(f"DEBUG SERVER: Root Key established for {client_addr}. Hash(ct||epk): {clients_dict[client_addr]['Hash_ct_epk_a'][:10]}...") # DEBUG
+    return Root_key
 
 
 def offchain_listener(server_socket):    #Listen for incoming off-chain client connections.
@@ -503,7 +509,7 @@ if __name__ == "__main__":
         exit()
         
     # --- Network Setup ---
-    offcahin_addr = ('localhost', 65432)          # server (off-chain) address
+    offcahin_addr = ('localhost', 65432)        # server (off-chain) address
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     server_socket.bind(offcahin_addr)
@@ -512,6 +518,10 @@ if __name__ == "__main__":
 
 
     # --- CLI Argument Parsing ---
+    if len(sys.argv) < 8:
+        print("Usage: python server.py <Eth_private_key> <contract_address> <project_id> <round_count> <client_req> <Dataset_type> <HE_algorithm>")
+        sys.exit(1)
+
     Eth_private_key=sys.argv[1]    
     contract_address = sys.argv[2]
     project_id=int(sys.argv[3])
@@ -527,10 +537,11 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     main_dir = os.path.dirname(script_dir)  # Get the path to the parent directory of the script
     with open(main_dir+"/contract/contract-abi.json", "r") as abi_file:
-        contract_abi = json.load(abi_file)     # Load ABI from file
+        contract_abi = json.load(abi_file)      # Load ABI from file
     contract = w3.eth.contract(address=contract_address, abi=contract_abi)  # Create a contract instance
 
     # --- Load HE Keys ---
+    HE_config_without_key = None
     if HE_algorithm=='CKKS':
         with open(main_dir + f'/server/keys/CKKS_without_priv_key.pkl', "rb") as f:
             serialized_without_key = pickle.load(f)
@@ -539,10 +550,15 @@ if __name__ == "__main__":
         with open(main_dir + f'/server/keys/BFV_without_priv_key.pkl', "rb") as f:
             serialized_without_key = pickle.load(f)
         HE_config_without_key = ts.context_from(serialized_without_key)
-    print(f"DEBUG SERVER: HE Config loaded for algorithm: {HE_algorithm}") # DEBUG
+    
+    if HE_config_without_key:
+        print(f"DEBUG SERVER: HE Config loaded for algorithm: {HE_algorithm}") # DEBUG
+    else:
+        print(f"DEBUG SERVER: No HE Config loaded (HE_algorithm is '{HE_algorithm}')")
+
     
     # --- Initial Key Generation & Project Registration ---
-    ecdh, kyber = generate_keys()    # remember the ecdh public key is in pem format
+    ecdh, kyber = generate_keys()     # remember the ecdh public key is in pem format
     hash_pubkeys=hash_data(kyber.pk+ecdh.pk) # string/hex hash
     print(f"DEBUG SERVER: Initial Pub Keys Hash: {hash_pubkeys[:10]}...") # DEBUG
 #-------------------------------------------------
@@ -550,11 +566,19 @@ if __name__ == "__main__":
     Init_Global_model = pickle.dumps(Init_Global_model.state_dict()) # bytes
     Hash_model = hash_data(Init_Global_model) # string/hex hash
     print(f"DEBUG SERVER: Initial Model Hash: {Hash_model[:10]}...") # DEBUG
+    
+    start_register_time = time.time()
     Tx_r =register_project(project_id, client_req, Hash_model, hash_pubkeys)
+    log_server_metrics({
+        'registration_tx_time_s': round(time.time() - start_register_time, 4),
+        'initial_model_hash': Hash_model,
+        'initial_keys_hash': hash_pubkeys
+    }, project_id, tag='register_project')
+
 
     # --- Client Registration & Setup ---
     registered_cnt=0
-    salt_a = salt_s = b'\0'*32    # asymmetric (salt_a) and symmetric (salt_s) salt (bytes)
+    salt_a = salt_s = b'\0'*32     # asymmetric (salt_a) and symmetric (salt_s) salt (bytes)
     registration_queue = Queue()
     stop_event = Event()
     print(f"DEBUG SERVER: Starting registration listeners...") # DEBUG
@@ -562,29 +586,7 @@ if __name__ == "__main__":
     Thread(target=wait_for_clients, args=(registration_queue, stop_event), daemon=True).start()
     Thread(target=offchain_listener, args=(server_socket,), daemon=True).start()
 
-    #  while registered_cnt < client_req:
-    #     try:
-    #         event = registration_queue.get(timeout=30)  # Wait for ClientRegistered event
-    #         eth_address = event['args']['clientAddress']                
-    #         session_id = registered_cnt + 1
-    #         clients_dict[eth_address] = {
-    #             'Session ID': session_id,
-    #             'score': event['args']['initialScore'],
-    #             'hash_epk': event['args']['hash_PubKeys'],
-    #             'registration_tx': event['transactionHash'].hex(),
-    #             'block_number': event['blockNumber']
-    #         }
-    #         registered_cnt += 1
-    #         print(f"DEBUG SERVER: Client {registered_cnt}/{client_req} registered: {eth_address}") # DEBUG
-    #     except Exception as e:
-    #         print(f"DEBUG SERVER: Timeout waiting for client registration or error: {str(e)}") # DEBUG
-    #         if registered_cnt == 0:
-    #             print("Exiting due to registration failure.")
-    #             sys.exit(1)
-    #         break
-
-
-# Wait for clients with a reasonable overall deadline and frequent small timeouts.
+    # Wait for clients with a reasonable overall deadline and frequent small timeouts.
     overall_wait_seconds = max(60, client_req * 60)  # e.g. 60s per required client
     deadline = time.time() + overall_wait_seconds
 
@@ -606,8 +608,8 @@ if __name__ == "__main__":
             print(f"DEBUG SERVER: Client {registered_cnt}/{client_req} registered: {eth_address}")  # DEBUG
         except Empty:
            # Normal: no event during timeout — print progress instead of error
-            print(f"DEBUG SERVER: Waiting for client registrations... {registered_cnt}/{client_req} registered.")
-            continue    
+           print(f"DEBUG SERVER: Waiting for client registrations... {registered_cnt}/{client_req} registered.")
+           continue      
         except Exception as e:
             print(f"DEBUG SERVER: Error while waiting for registration: {repr(e)}")
             continue
@@ -616,18 +618,18 @@ if __name__ == "__main__":
         print(f"DEBUG SERVER: Registration deadline reached ({registered_cnt}/{client_req} registered).")
 
 
-        print("All clients registered or timeout reached.")
-        stop_event.set()   # Signal the on-chain listener thread to stop
-        print('-'*75)
+    print("All clients registered or timeout reached.")
+    stop_event.set()   # Signal the on-chain listener thread to stop
+    print('-'*75)
     
     Global_Model=Init_Global_model # bytes
     Models=[]
     task_info= {}
     ratchet_renge=2
     accuracy_list=[]
-   
+    
     # --- Main FL Rounds Loop ---
-    for r in range(1,round_count+1):    
+    for r in range(1,round_count+1):     
         print(f"\n====================== ROUND {r} START ======================") # DEBUG
         Task_id=int(str(project_id)+str(r))
         task_info['Round number'] = r
@@ -638,6 +640,8 @@ if __name__ == "__main__":
 
     # Publish Task
         hash_pubkeys='None'
+        start_publish_time = time.time() # Start timer before publish TX
+        
         if r%ratchet_renge==0:     # Assymmetric ratcheting condition
             ecdh, kyber = generate_keys() 
             hash_pubkeys=hash_data(kyber.pk+ecdh.pk)
@@ -649,21 +653,33 @@ if __name__ == "__main__":
             task_info['Publish Tx'] = Tx_p 
             print("DEBUG SERVER: Symmetric ratcheting only for this round.") # DEBUG
 
+        # --- Log Task Publish Metrics ---
+        log_server_metrics({
+            'round': r,
+            'publish_tx_time_s': round(time.time() - start_publish_time, 4),
+            'model_hash': Hash_model,
+            'ratcheting': 'asymm' if r%ratchet_renge==0 else 'symm'
+        }, project_id, tag='publish')
+        # -------------------------------------
+
+
         json_task_info = json.dumps(task_info, indent=4)
         
         # Wrap the global model (bytes) for encryption
         if r!=1 and HE_algorithm!='None':
-            wraped_global_model=wrapfiles(('task_info.json',json_task_info.encode()), ('global_HE_model.bin',aggregated_HE_model))  # aggregated_HE_model is bytes
+            # aggregated_HE_model is bytes (from previous round)
+            wraped_global_model=wrapfiles(('task_info.json',json_task_info.encode()), ('global_HE_model.bin',aggregated_HE_model))
         else:
-            wraped_global_model=wrapfiles(('task_info.json',json_task_info.encode()), ('global_model.pth',Global_Model))  # Global_Model is bytes
+            # Global_Model is bytes (Initial model or normal aggregated model)
+            wraped_global_model=wrapfiles(('task_info.json',json_task_info.encode()), ('global_model.pth',Global_Model)) 
         
         print(f"DEBUG SERVER: Global Model wrapped. Size: {len(wraped_global_model)} bytes.") # DEBUG
 
 
-        print(f"Start Round {r}: Waiting for local model updates...\n"+'='*20)        
+        print(f"Start Round {r}: Waiting for local model updates...\n"+'='*20)         
         event_queue = Queue()
-        block_filter =  w3 .eth.filter('latest')
-        worker = Thread(target=listen_for_updates, args=(block_filter,event_queue), daemon=True)
+        # block_filter = w3.eth.filter('latest') # This line is redundant/was causing issues, using contract.events.ModelUpdated.create_filter
+        worker = Thread(target=listen_for_updates, args=({}, event_queue), daemon=True) # Pass an empty dict as placeholder for filter args
         worker.start()
         client_addrs=[]
         update_dict={}
@@ -687,8 +703,8 @@ if __name__ == "__main__":
 
                 if r_update==r and Task_id_update==Task_id and project_id_update==project_id:
                     update_dict[client_addr]= {'round': r_update, 'Task id':Task_id_update , 
-                                                   'Tx_u': tx_u, 'Project id':project_id_update, 
-                                                   'Local model hash':Hash_local_model} 
+                                                 'Tx_u': tx_u, 'Project id':project_id_update, 
+                                                 'Local model hash':Hash_local_model} 
                 else:
                     print('DEBUG SERVER: Model update info not related to current round/project. Skipping.') # DEBUG
                     continue
@@ -704,8 +720,8 @@ if __name__ == "__main__":
                 # Retrieve model data received via off-chain listener
                 Recieved_model=model_info.get(client_addr, {}).get('model_data')
                 if Recieved_model is None:
-                    print(f"DEBUG SERVER: ERROR: Model data missing for {client_addr} in model_info.") # DEBUG
-                    continue # Skip this client
+                    print(f"DEBUG SERVER: ERROR: Model data missing for {client_addr} in model_info. Waiting...") # DEBUG
+                    continue # Skip this client and wait for it to send data off-chain
 
                 unwrapped_msg=unwrap_files(Recieved_model)
                 signature=unwrapped_msg['signature.bin']
@@ -731,30 +747,50 @@ if __name__ == "__main__":
                     Res, Feedback_score = analyze_model(Local_model,Task_id_update,project_id_update)
                     if Res:
                         cnt_models+=1  # save local model for using in aggregation
-                        open(main_dir + f"/server/files/local models/local_model_{client_addr}.pth",'wb').write(Local_model)  
-                        Tx_f=feedback_TX (r,Task_id, project_id,client_addr, Feedback_score, T)    
+                        open(main_dir + f"/server/files/local models/local_model_{client_addr}.pth",'wb').write(Local_model)   
+                        Tx_f=feedback_TX (r,Task_id, project_id,client_addr, Feedback_score, T)     
+                    accuracy=0.0 # Will be updated during aggregation
                 else:
                     local_HE_model=unwraped[f'local_HE_model_{client_addr}.bin']
                     assert Hash_local_model==hash_data(local_HE_model), f" on-chain and off-chain Hash of local model {client_addr} are not match :("    # Hash check on model bytes
                     cnt_models+=1  # save local model for using in aggregation
                     open(main_dir + f"/server/files/local models/local_HE_model_{client_addr}.bin",'wb').write(local_HE_model)
-                    Feedback_score=0  
+                    Feedback_score=0   
                     Tx_f=feedback_TX (r,Task_id, project_id, client_addr, Feedback_score, T) 
+                    accuracy=0.0 # HE models need decryption to get final accuracy/weights
+
                 
                 print(f"DEBUG SERVER: Successfully processed local model {cnt_models}/{registered_cnt}.") # DEBUG
 
                 if cnt_models==registered_cnt:
                     print("DEBUG SERVER: All required models received. Starting aggregation.") # DEBUG
+                    
+                    start_agg_time = time.time() # Start timer before aggregation
+                    
                     if HE_algorithm=='None':
-                        normal_aggregated,accuracy=aggregate.aggregate_models(client_addrs,HE_algorithm,Dataset_type)
+                        normal_aggregated, accuracy = aggregate.aggregate_models(client_addrs,HE_algorithm,Dataset_type)
                         Global_Model=pickle.dumps(normal_aggregated.state_dict())
                         Hash_model = hash_data(Global_Model)
                         torch.save(normal_aggregated.state_dict(), main_dir+'/server/files/global_model.pth')
                         print('*'*40+f'\nAccuracy global model in round {r}: {accuracy:.5f}\n'+'*'*40)
                     else:
-                        aggregated_HE_model= aggregate.aggregate_models(client_addrs,HE_algorithm,Dataset_type) 
+                        aggregated_HE_model = aggregate.aggregate_models(client_addrs,HE_algorithm,Dataset_type) 
                         Hash_model = hash_data(aggregated_HE_model)
                         open(main_dir + f"/server/files/global_HE_model.bin",'wb').write(aggregated_HE_model) 
+                        accuracy = 0.0 # Placeholder/requires HE decryption & validation
+                    
+                    end_agg_time = time.time() # End timer
+
+                    # --- Log Aggregation Metrics ---
+                    log_server_metrics({
+                        'round': r,
+                        'aggregation_time_s': round(end_agg_time - start_agg_time, 4),
+                        'num_models_aggregated': cnt_models,
+                        'model_hash': Hash_model,
+                        'accuracy': round(accuracy, 5) # Log accuracy if available
+                    }, project_id, tag='aggregate')
+                    # -------------------------------------
+                    
                     print(f"DEBUG SERVER: Aggregation complete. New Global Hash: {Hash_model[:10]}...") # DEBUG
                     break
             else:
@@ -762,9 +798,9 @@ if __name__ == "__main__":
 
         # Symmetric ratcheting of model-key for each client at the end of round
         print("\nDEBUG SERVER: Starting symmetric ratcheting for all clients.") # DEBUG
-        for addr in clients_dict:   
+        for addr in clients_dict:  
             chain_key=bytes.fromhex(clients_dict[addr]['Chain key'])  # get previous chain key
-            if  r%ratchet_renge==0: # Check if asymmetric ratcheting happened this round
+            if r%ratchet_renge==0: # Check if asymmetric ratcheting happened this round
                 Root_key=bytes.fromhex(clients_dict[addr]['Root key'])
                 chain_key, Model_key = HKDF(Root_key, 32, salt_s, SHA384, 2)
                 print(f"DEBUG SERVER: Client {addr[:6]}...: Used Root Key for symmetric derivation.") # DEBUG
@@ -776,9 +812,9 @@ if __name__ == "__main__":
             clients_dict[addr]['Chain key'] = chain_key.hex()  # update keys of dict of clients
             
         salt_s=(bytes_to_long(salt_s)+1).to_bytes(32, byteorder='big')        #  salt_s  increment(update salt) 
-        salt_a=(bytes_to_long(salt_a)+1).to_bytes(32, byteorder='big')        #  salt_a  increment(update salt)           
+        salt_a=(bytes_to_long(salt_a)+1).to_bytes(32, byteorder='big')        #  salt_a  increment(update salt)       
         print(f"DEBUG SERVER: Ratcheting finished. New salt_s: {salt_s.hex()[:10]}...") # DEBUG
         
-finish_tash(Task_id,project_id) # transaction termination for recording on   blockchain
-finish_project(project_id)
-print("--- SERVER FINISHED ---") # DEBUG: Execution ends here
+    finish_tash(Task_id,project_id) # transaction termination for recording on  blockchain
+    finish_project(project_id)
+    print("--- SERVER FINISHED ---") # DEBUG: Execution ends here
