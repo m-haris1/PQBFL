@@ -1,14 +1,13 @@
 """
 Created on Tue Jan  2 14:18:41 2024
-
 @author: HIGHer
-""" 
+"""
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from eth_account import Account
 
 from collections import namedtuple
-from pqcrypto.kem import ml_kem_768 
+from pqcrypto.kem import ml_kem_768
 
 from Crypto.Protocol.DH import key_agreement
 from Crypto.Protocol.KDF import HKDF
@@ -22,7 +21,7 @@ import os, sys, time,json
 
 import aggregate
 from threading import *
-from queue import Queue
+from queue import Queue, Empty
 import torch
 
 
@@ -95,35 +94,113 @@ def register_project(project_id, cnt_clients_req, hash_init_model, hash_keys):
         sys.exit()
 
 
-def wait_for_clients(event_queue, stop_event, poll_interval=2):
-    print('DEBUG SERVER: Event listener thread started (ClientRegistered events)') # DEBUG
-    if geth_poa_middleware not in w3.middleware_onion: 
-        # Add PoA middleware for Ganache (if needed)
+# def wait_for_clients(event_queue, stop_event, poll_interval=2):
+#     print('DEBUG SERVER: Event listener thread started (ClientRegistered events)') # DEBUG
+#     if geth_poa_middleware not in w3.middleware_onion: 
+#         # Add PoA middleware for Ganache (if needed)
+#         w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+#     # Create an instance of the contract
+#     contract = w3.eth.contract(address=contract_address, abi=contract_abi)
+#     last_processed_block = w3.eth.block_number  # Keep track of the last processed block
+#     while not stop_event.is_set():  # Check the stop_event to terminate the loop
+#         try:
+#             current_block = w3.eth.block_number  # Get current block number
+#             if current_block > last_processed_block:
+#                 # Create filter for the specific block range
+#                 event_filter = contract.events.ClientRegistered.create_filter(
+#                     fromBlock=last_processed_block + 1,
+#                     toBlock=current_block
+#                 )
+#                 events = event_filter.get_all_entries()  # Get events 
+#                 for event in events:  # Process events
+#                     event_queue.put(event)
+#                     print(f"DEBUG SERVER: Client registration event caught at block {event['blockNumber']}: {event['args']['clientAddress']}") # DEBUG
+#                 last_processed_block = current_block  # Update last processed block
+#                 w3.eth.uninstall_filter(event_filter.filter_id)  # Clean up filter
+
+#             time.sleep(poll_interval)  # Wait before next poll
+#         except Exception as e:
+#             print(f"DEBUG SERVER: Error in registration event listener: {str(e)}") # DEBUG
+#             time.sleep(poll_interval)  # Wait before retrying
+
+
+# ...existing code...
+def wait_for_clients(event_queue, stop_event, poll_interval=1):
+    """
+    Robust on-chain event poller for ClientRegistered events.
+    Uses an inclusive from_block and dedup set (txHash+logIndex) so events
+    emitted in the same block are not missed.
+    """
+    global w3, contract_address, contract_abi
+    print('DEBUG SERVER: Event listener thread started (ClientRegistered events)')
+
+    if geth_poa_middleware not in w3.middleware_onion:
         w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-    # Create an instance of the contract
+
     contract = w3.eth.contract(address=contract_address, abi=contract_abi)
-    last_processed_block = w3.eth.block_number  # Keep track of the last processed block
-    while not stop_event.is_set():  # Check the stop_event to terminate the loop
+
+    # Start slightly before tip to reduce race windows
+    last_processed_block = max(0, w3.eth.block_number - 1)
+
+    # Keep a set of processed event identifiers to avoid duplicates
+    processed_events = set()
+
+    while not stop_event.is_set():
         try:
-            current_block = w3.eth.block_number  # Get current block number
-            if current_block > last_processed_block:
-                # Create filter for the specific block range
-                event_filter = contract.events.ClientRegistered.create_filter(
-                    fromBlock=last_processed_block + 1,
-                    toBlock=current_block
-                )
-                events = event_filter.get_all_entries()  # Get events 
-                for event in events:  # Process events
-                    event_queue.put(event)
-                    print(f"DEBUG SERVER: Client registration event caught at block {event['blockNumber']}: {event['args']['clientAddress']}") # DEBUG
-                last_processed_block = current_block  # Update last processed block
-                w3.eth.uninstall_filter(event_filter.filter_id)  # Clean up filter
+            current_block = w3.eth.block_number
+            print(f"DEBUG SERVER: wait_for_clients: last_processed={last_processed_block}, current={current_block}, queue_size={event_queue.qsize()}")
 
-            time.sleep(poll_interval)  # Wait before next poll
+            # Query inclusive range [last_processed_block, current_block] so we do not miss events in the same block
+            from_block = last_processed_block
+            to_block = current_block
+
+            events = []
+            try:
+                events = contract.events.ClientRegistered().getLogs(fromBlock=from_block, toBlock=to_block)
+            except Exception as ex_getlogs:
+                # fallback to filter-based retrieval
+                try:
+                    event_filter = contract.events.ClientRegistered.create_filter(fromBlock=from_block, toBlock=to_block)
+                    events = event_filter.get_all_entries()
+                    try:
+                        w3.eth.uninstall_filter(event_filter.filter_id)
+                    except Exception:
+                        pass
+                except Exception as ex_filter:
+                    print(f"DEBUG SERVER: getLogs/filter failed: getLogs_err={ex_getlogs} filter_err={ex_filter}")
+                    events = []
+
+            if events:
+                print(f"DEBUG SERVER: wait_for_clients: found {len(events)} ClientRegistered events in blocks {from_block}-{to_block}")
+                for event in events:
+                    # build a stable id for deduplication (txHash + logIndex)
+                    txh = event.get('transactionHash')
+                    if isinstance(txh, bytes):
+                        txh = txh.hex()
+                    log_index = event.get('logIndex', None)
+                    ev_id = (txh, log_index)
+                    if ev_id in processed_events:
+                        continue
+                    processed_events.add(ev_id)
+
+                    try:
+                        event_queue.put(event)
+                        addr = event['args'].get('clientAddress') if 'args' in event and event['args'] else event['args']
+                        print(f"DEBUG SERVER: Client registration event queued at block {event.get('blockNumber', to_block)}: {addr}")
+                    except Exception as q_ex:
+                        print(f"DEBUG SERVER: Failed to put event into queue: {q_ex}")
+            else:
+                print(f"DEBUG SERVER: No ClientRegistered events in blocks {from_block}-{to_block}")
+
+            # Advance pointer to current tip (we used inclusive query)
+            last_processed_block = to_block
+
+            time.sleep(poll_interval)
+
         except Exception as e:
-            print(f"DEBUG SERVER: Error in registration event listener: {str(e)}") # DEBUG
-            time.sleep(poll_interval)  # Wait before retrying
-
+            print(f"DEBUG SERVER: Error in registration event listener: {e}")
+            time.sleep(poll_interval)
+# ...existing code...
 
 def finish_tash(task_id, project_id):
     contract = w3.eth.contract(address=contract_address, abi=contract_abi)
@@ -485,10 +562,37 @@ if __name__ == "__main__":
     Thread(target=wait_for_clients, args=(registration_queue, stop_event), daemon=True).start()
     Thread(target=offchain_listener, args=(server_socket,), daemon=True).start()
 
-    while registered_cnt < client_req:
+    #  while registered_cnt < client_req:
+    #     try:
+    #         event = registration_queue.get(timeout=30)  # Wait for ClientRegistered event
+    #         eth_address = event['args']['clientAddress']                
+    #         session_id = registered_cnt + 1
+    #         clients_dict[eth_address] = {
+    #             'Session ID': session_id,
+    #             'score': event['args']['initialScore'],
+    #             'hash_epk': event['args']['hash_PubKeys'],
+    #             'registration_tx': event['transactionHash'].hex(),
+    #             'block_number': event['blockNumber']
+    #         }
+    #         registered_cnt += 1
+    #         print(f"DEBUG SERVER: Client {registered_cnt}/{client_req} registered: {eth_address}") # DEBUG
+    #     except Exception as e:
+    #         print(f"DEBUG SERVER: Timeout waiting for client registration or error: {str(e)}") # DEBUG
+    #         if registered_cnt == 0:
+    #             print("Exiting due to registration failure.")
+    #             sys.exit(1)
+    #         break
+
+
+# Wait for clients with a reasonable overall deadline and frequent small timeouts.
+    overall_wait_seconds = max(60, client_req * 60)  # e.g. 60s per required client
+    deadline = time.time() + overall_wait_seconds
+
+    while registered_cnt < client_req and time.time() < deadline:
         try:
-            event = registration_queue.get(timeout=30)  # Wait for ClientRegistered event
-            eth_address = event['args']['clientAddress']                
+            event = registration_queue.get(timeout=5)  # short timeout to allow status logs
+            eth_address = event['args']['clientAddress']
+
             session_id = registered_cnt + 1
             clients_dict[eth_address] = {
                 'Session ID': session_id,
@@ -497,18 +601,24 @@ if __name__ == "__main__":
                 'registration_tx': event['transactionHash'].hex(),
                 'block_number': event['blockNumber']
             }
-            registered_cnt += 1
-            print(f"DEBUG SERVER: Client {registered_cnt}/{client_req} registered: {eth_address}") # DEBUG
-        except Exception as e:
-            print(f"DEBUG SERVER: Timeout waiting for client registration or error: {str(e)}") # DEBUG
-            if registered_cnt == 0:
-                print("Exiting due to registration failure.")
-                sys.exit(1)
-            break
 
-    print("All clients registered or timeout reached.")
-    stop_event.set()   # Signal the on-chain listener thread to stop
-    print('-'*75)
+            registered_cnt += 1
+            print(f"DEBUG SERVER: Client {registered_cnt}/{client_req} registered: {eth_address}")  # DEBUG
+        except Empty:
+           # Normal: no event during timeout — print progress instead of error
+            print(f"DEBUG SERVER: Waiting for client registrations... {registered_cnt}/{client_req} registered.")
+            continue    
+        except Exception as e:
+            print(f"DEBUG SERVER: Error while waiting for registration: {repr(e)}")
+            continue
+
+    if registered_cnt < client_req:
+        print(f"DEBUG SERVER: Registration deadline reached ({registered_cnt}/{client_req} registered).")
+
+
+        print("All clients registered or timeout reached.")
+        stop_event.set()   # Signal the on-chain listener thread to stop
+        print('-'*75)
     
     Global_Model=Init_Global_model # bytes
     Models=[]

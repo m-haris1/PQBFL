@@ -558,7 +558,8 @@ if __name__ == "__main__":
             print(f"DEBUG: Standard Model received. Data type: {type(global_model)}. Length: {len(global_model)}")
 
         print("Start training...")
-        Local_model = train_model.train(global_model, num_epochs, dataset_type)
+        FedProx_mu = 0.1
+        Local_model = train_model.train(global_model, num_epochs, dataset_type, mu=FedProx_mu)
         print(f"DEBUG: Training complete. Local_model object type: {type(Local_model)}")
 
         if HE_algorithm != 'None':
