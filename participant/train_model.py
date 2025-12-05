@@ -27,7 +27,7 @@
 #     y_train_file = os.path.normpath(os.path.join(dataset_addr, 'y_train.txt'))
 
 #     print(f"DEBUG: Loading X_train from: {x_train_file}")
-    
+
 #     x_train = np.loadtxt(x_train_file)
 #     y_train = np.loadtxt(y_train_file)
 
@@ -262,6 +262,7 @@ from torch.utils.data import TensorDataset, DataLoader, random_split
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
 from torchvision import datasets, transforms
+import torch.optim.lr_scheduler # Added for learning rate scheduler
 
 from simple_cnn_config import SimpleCNN  # Ensure this file exists
 
@@ -347,6 +348,7 @@ def train_model(
         optimizer,
         epochs,
         device,
+        scheduler=None, # Added scheduler parameter
         global_state_dict=None,
         mu=0.0
     ):
@@ -392,6 +394,9 @@ def train_model(
                 running_loss = 0.0
 
         validate_model(model, validation_dataloader, device)
+
+        if scheduler is not None:
+            scheduler.step() # Update learning rate at the end of each epoch
 
     return model
 
@@ -466,6 +471,7 @@ def train(global_model, num_epochs, dataset_type, mu=0.0):
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5) # Initialize StepLR
 
     # --- Train (with FedProx support) ---
     train_model(
@@ -476,6 +482,7 @@ def train(global_model, num_epochs, dataset_type, mu=0.0):
         optimizer,
         num_epochs,
         device='cpu',
+        scheduler=scheduler, # Pass scheduler to train_model
         global_state_dict=global_state_dict,
         mu=mu  # FedProx coefficient (0 = FedAvg)
     )
