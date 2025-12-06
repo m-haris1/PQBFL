@@ -27,7 +27,7 @@
 #     y_train_file = os.path.normpath(os.path.join(dataset_addr, 'y_train.txt'))
 
 #     print(f"DEBUG: Loading X_train from: {x_train_file}")
-
+    
 #     x_train = np.loadtxt(x_train_file)
 #     y_train = np.loadtxt(y_train_file)
 
@@ -249,11 +249,6 @@
 
 
 
-"""
-Created on Tue Jan  2 14:18:41 2024
-@author: HIGHer
-"""
-
 import os
 import io
 import pickle
@@ -470,7 +465,7 @@ def train(global_model, num_epochs, dataset_type, mu=0.0):
     validation_dataloader = DataLoader(validation_dataset, batch_size=64)
 
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4) # Added L2 regularization
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5) # Initialize StepLR
 
     # --- Train (with FedProx support) ---

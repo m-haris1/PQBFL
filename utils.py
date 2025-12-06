@@ -20,6 +20,12 @@ import numpy as np
 import hashlib
 import struct
 
+# For benchmarking
+import time
+import tenseal as ts
+import torch
+import numpy as np
+
 # -----------------------------
 # IPFS CONFIG
 # -----------------------------
@@ -91,7 +97,7 @@ def serialize_data(encrypted_model, metadata, HE_algorithm):
         data_package['weights'][name] = enc_weight.serialize()
     buffer = io.BytesIO()
     pickle.dump(data_package, buffer)
-    return buffer.getvalue()
+    return buffer.getvalue() # Reverted gzip compression
 
 def deserialize_data(serialized_data, context):
     data_package = pickle.loads(serialized_data)
@@ -265,3 +271,7 @@ def send_model(sock, data):
     data_size = len(data)
     sock.sendall(struct.pack('!I', data_size))
     sock.sendall(data)
+
+if __name__ == "__main__":
+    # Removed temporary benchmarking code.
+    pass

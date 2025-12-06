@@ -363,6 +363,7 @@ def listen_for_feedback(current_round, client_address, blocks_lookback=10):
 
 
 if __name__ == "__main__":
+    start_time = time.time()
     print("--- CLIENT START ---")
     # connect to ganache
     try:
@@ -581,7 +582,56 @@ if __name__ == "__main__":
             raise
         training_time = time.time() - round_start
         print(f"DEBUG: Training complete. Time: {training_time:.3f}s. Local_model object type: {type(Local_model)}")
- 
+
+ # ! From here 
+                # --- simulate leakage attack locally for demo (do NOT send this anywhere)
+        try:
+            import pickle, os
+            from simple_cnn_config import SimpleCNN
+            import torch
+
+            def _model_obj(model_or_bytes):
+                # return an nn.Module if possible
+                if isinstance(model_or_bytes, (bytes, bytearray)):
+                    try:
+                        sd = pickle.loads(model_or_bytes)
+                        m = SimpleCNN(dataset_type)
+                        m.load_state_dict(sd)
+                        return m
+                    except Exception:
+                        return None
+                if hasattr(model_or_bytes, "state_dict"):
+                    return model_or_bytes
+                return None
+
+            model_before = _model_obj(global_model)
+            if model_before is not None:
+                old_weights = {k: v.clone().detach() for k, v in model_before.state_dict().items()}
+                new_weights = {k: v.clone().detach() for k, v in Local_model.state_dict().items()}
+                raw_update = {k: (new_weights[k] - old_weights[k]).cpu() for k in old_weights.keys()}
+
+                # save raw update for offline attack analysis
+                outdir = os.path.join(main_dir, "metrics", "leakage_demo")
+                os.makedirs(outdir, exist_ok=True)
+                fname = os.path.join(outdir, f"raw_update_{ETH_address}_r{r}.pkl")
+                with open(fname, "wb") as f:
+                    pickle.dump(raw_update, f)
+                print(f"DEBUG: Saved raw (unencrypted) model update for demo: {fname}")
+
+                # optional: call a demo attacker function if you implemented it
+                try:
+                    # place your demo attacker in participant/tools/demo_attacker.py
+                    from participant.demo_attacker import demo_gradient_attack, show_image
+                    recon = demo_gradient_attack(model_before, raw_update, dataset_type=dataset_type)
+                    if recon is not None:
+                        show_image(recon)
+                except Exception as e:
+                    print(f"DEBUG: demo attacker unavailable or failed: {e}")
+            else:
+                print("DEBUG: Could not construct model object from received global_model; skipping leakage demo.")
+        except Exception as e:
+            print(f"DEBUG: leakage simulation skipped due to error: {e}")
+
         if HE_algorithm != 'None':
             HE_enc_model, metadata = HE_encrypt_model(Local_model, HE_config_with_key, HE_algorithm)
             serialized_model = serialize_data(HE_enc_model, metadata, HE_algorithm)
@@ -663,5 +713,8 @@ if __name__ == "__main__":
         salt_a = (bytes_to_long(salt_a) + 1).to_bytes(32, 'big')
         print(f"DEBUG: Symmetric Ratcheting complete. Old Chain Key: {old_chain_key[:10]}..., New Model Key: {Model_key.hex()[:10]}...")
         print("--------------------- ROUND END ---------------------")
+        end_time = time.time()
+        total_runtime = end_time - start_time
+        print(f"\n--- Total Program Runtime: {total_runtime:.2f} seconds ---")        
 
     print("Client finished.")

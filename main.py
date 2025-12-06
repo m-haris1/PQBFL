@@ -1,6 +1,7 @@
 import subprocess
 import os
 import argparse
+import time
 
 
 def run_client(client_eth_key, contract_address, client_path, project_id, round_num, client_req, dataset, homomorphic):
@@ -22,6 +23,8 @@ def run_server(server_eth_key, contract_address, server_path, project_id, round_
 
 
 if __name__ == "__main__":
+    start_time = time.time()
+
     parser = argparse.ArgumentParser(description="Run participant or server mode with specific arguments")
     parser.add_argument("-m", "--mode", choices=["participant", "server"], required=True)
     parser.add_argument("-c", "--contract", required=True, help="Contract address in hex (0x...)")
@@ -42,3 +45,7 @@ if __name__ == "__main__":
     elif args.mode == "server":
         server_path = main_dir + "/server/server.py"
         run_server(args.eth_key, args.contract, server_path, args.project_id, args.round, args.participants, args.dataset, args.homomorphic)
+
+    end_time = time.time()
+    total_runtime = end_time - start_time
+    print(f"\n--- Total Program Runtime: {total_runtime:.2f} seconds ---")
